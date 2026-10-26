@@ -1,0 +1,958 @@
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 84e1bd19..1770dfaa 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -65,6 +65,7 @@ function lazyView(load) {
+ const Admin = lazyView(() => import('./views/Admin.jsx'))
+ const CoachChat = lazyView(() => import('./views/CoachChat.jsx'))
+ const Measurements = lazyView(() => import('./views/Measurements.jsx'))
++const Nutrition = lazyView(() => import('./views/Nutrition.jsx'))
+ const CoachIntake = lazyView(() => import('./views/CoachIntake.jsx'))
+ const CoachSetup = lazyView(() => import('./views/CoachSetup.jsx'))
+ const StructuralBalance = lazyView(() => import('./views/StructuralBalance.jsx'))
+@@ -304,6 +305,7 @@ function Shell() {
+       <Route path="/structural-balance" element={<StructuralBalance />} />
+       <Route path="/progress-photos" element={<ProgressPhotos />} />
+       <Route path="/measurements" element={<Measurements />} />
++      <Route path="/nutrition" element={<Nutrition />} />
+       <Route path="/settings" element={<SettingsRoute />} />
+       <Route path="/settings/:page" element={<SettingsRoute />} />
+       {/* The Coach screens gate themselves on the instance config; the routes exist
+diff --git a/frontend/src/components/TabBar.jsx b/frontend/src/components/TabBar.jsx
+index 75219900..9c9fd11f 100644
+--- a/frontend/src/components/TabBar.jsx
++++ b/frontend/src/components/TabBar.jsx
+@@ -31,7 +31,7 @@ export default function TabBar({ onStart }) {
+   if (!user && !isGuest) return null
+   const cur = loc.pathname.split('/')[1] || 'home'
+   // A screen without a tab of its own lights the tab it is opened from (Muscles from both).
+-  const PARENT = { history: 'stats', 'structural-balance': 'stats', 'progress-photos': 'stats', measurements: 'stats', settings: 'home', checkin: 'home', muscles: 'library' }
++  const PARENT = { history: 'stats', 'structural-balance': 'stats', 'progress-photos': 'stats', measurements: 'stats', nutrition: 'home', settings: 'home', checkin: 'home', muscles: 'library' }
+   const parent = cur === 'muscles' && loc.state?.from === '/stats' ? 'stats' : PARENT[cur]
+   const on = k => cur === k || parent === k
+ 
+diff --git a/frontend/src/lib/nutrition.js b/frontend/src/lib/nutrition.js
+new file mode 100644
+index 00000000..6e5fd480
+--- /dev/null
++++ b/frontend/src/lib/nutrition.js
+@@ -0,0 +1,188 @@
++// Nutrition counter: calories, protein and water per day.
++//
++// Kept on this device only, under its own localStorage key (store/useNutrition.js), so it is not
++// part of the synced profile (S): the sync merge and the server never see it. Everything here is a
++// pure helper that returns a new object and never edits its input, with a unit test beside it.
++//
++// Shape:
++//   { v: 1,
++//     targets: { kcal, protein, water },            // water in millilitres
++//     foods:   [{ id, name, kcal, protein }],        // saved foods for one-tap adding
++//     days:    { 'YYYY-MM-DD': { entries: [{ id, name, kcal, protein }], water } } }
++import { dateLocale } from './i18n-core.js'
++import { isoOf, uid } from './format.js'
++
++export const NUTRITION_KEY = 'gym_nutrition_v1'
++export const DEFAULT_TARGETS = { kcal: 2300, protein: 130, water: 2500 }
++// [min, max] a target may be set to.
++export const TARGET_LIMITS = { kcal: [800, 6000], protein: [20, 400], water: [500, 8000] }
++
++const MAX_FOODS = 60
++const MAX_ENTRIES = 100
++const MAX_DAYS = 400
++const MAX_NAME = 60
++const MAX_WATER = 20000
++const ISO = /^\d{4}-\d{2}-\d{2}$/
++
++// A finite number clamped to [lo, hi] and rounded to `dp` decimals; null for anything else.
++function num(v, lo, hi, dp = 0) {
++  if (v === '' || v == null || typeof v === 'boolean') return null
++  const n = Number(v)
++  if (!Number.isFinite(n)) return null
++  const f = 10 ** dp
++  return Math.round(Math.min(hi, Math.max(lo, n)) * f) / f
++}
++const cleanName = s => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_NAME)
++
++export const emptyNutrition = () => ({ v: 1, targets: { ...DEFAULT_TARGETS }, foods: [], days: {} })
++
++function normalizeFood(f, i) {
++  if (!f || typeof f !== 'object') return null
++  const name = cleanName(f.name)
++  const kcal = num(f.kcal, 0, 5000)
++  const protein = num(f.protein ?? 0, 0, 500, 1)
++  if (!name || kcal == null || protein == null) return null
++  return { id: typeof f.id === 'string' && f.id ? f.id : 'f' + i, name, kcal, protein }
++}
++function normalizeEntry(e, i) {
++  if (!e || typeof e !== 'object') return null
++  const kcal = num(e.kcal, 0, 5000)
++  const protein = num(e.protein ?? 0, 0, 500, 1)
++  if (kcal == null || protein == null) return null
++  return { id: typeof e.id === 'string' && e.id ? e.id : 'e' + i, name: cleanName(e.name), kcal, protein }
++}
++
++// Whatever was stored or imported, turned into a valid state: junk is dropped, numbers are
++// clamped, caps keep the file small. Never throws.
++export function normalizeNutrition(raw) {
++  const out = emptyNutrition()
++  if (!raw || typeof raw !== 'object') return out
++  const tg = raw.targets && typeof raw.targets === 'object' ? raw.targets : {}
++  for (const k of Object.keys(DEFAULT_TARGETS)) {
++    const [lo, hi] = TARGET_LIMITS[k]
++    out.targets[k] = num(tg[k], lo, hi) ?? DEFAULT_TARGETS[k]
++  }
++  const seen = new Set()
++  const foods = Array.isArray(raw.foods) ? raw.foods : []
++  for (let i = 0; i < foods.length && out.foods.length < MAX_FOODS; i++) {
++    const food = normalizeFood(foods[i], i)
++    if (!food || seen.has(food.name.toLowerCase())) continue
++    seen.add(food.name.toLowerCase())
++    out.foods.push(food)
++  }
++  const days = raw.days && typeof raw.days === 'object' ? raw.days : {}
++  for (const iso of Object.keys(days).filter(k => ISO.test(k)).sort().slice(-MAX_DAYS)) {
++    const d = days[iso]
++    if (!d || typeof d !== 'object') continue
++    const entries = (Array.isArray(d.entries) ? d.entries : []).map(normalizeEntry).filter(Boolean).slice(0, MAX_ENTRIES)
++    const water = num(d.water, 0, MAX_WATER) ?? 0
++    if (entries.length || water) out.days[iso] = { entries, water }
++  }
++  return out
++}
++
++export const dayOf = (N, iso) => N.days[iso] || { entries: [], water: 0 }
++
++export function dayTotals(day) {
++  let kcal = 0
++  let protein = 0
++  for (const e of day.entries) { kcal += e.kcal; protein += e.protein }
++  return { kcal: Math.round(kcal), protein: Math.round(protein * 10) / 10, water: day.water || 0, count: day.entries.length }
++}
++
++// The day with `fn` applied to it; a day left with nothing in it is dropped from the file.
++function withDay(N, iso, fn) {
++  const day = dayOf(N, iso)
++  const next = fn({ entries: day.entries, water: day.water || 0 })
++  const days = { ...N.days }
++  if (next.entries.length || next.water) days[iso] = next
++  else delete days[iso]
++  return { ...N, days }
++}
++
++// A food eaten on `iso`. Returns N itself when the input is not usable, so callers can tell
++// nothing changed. The name may be empty: "200 kcal" is a fair entry.
++export function addEntry(N, iso, { name, kcal, protein }, id = uid()) {
++  const k = num(kcal, 0, 5000)
++  const p = num(protein ?? 0, 0, 500, 1)
++  if (!ISO.test(iso) || k == null || p == null || (k === 0 && p === 0)) return N
++  if (dayOf(N, iso).entries.length >= MAX_ENTRIES) return N
++  return withDay(N, iso, d => ({ ...d, entries: [...d.entries, { id, name: cleanName(name), kcal: k, protein: p }] }))
++}
++
++export const removeEntry = (N, iso, id) => withDay(N, iso, d => ({ ...d, entries: d.entries.filter(e => e.id !== id) }))
++
++// Water in millilitres, added or (negative) taken back; never below 0.
++export function addWater(N, iso, ml) {
++  const n = Number(ml)
++  if (!ISO.test(iso) || !Number.isFinite(n)) return N
++  return withDay(N, iso, d => ({ ...d, water: Math.min(MAX_WATER, Math.max(0, Math.round(d.water + n))) }))
++}
++
++// Saves a food for one-tap adding. The same name (any case) updates the saved one.
++export function saveFood(N, { name, kcal, protein }, id = uid()) {
++  const food = normalizeFood({ id, name, kcal, protein }, 0)
++  if (!food) return N
++  const i = N.foods.findIndex(f => f.name.toLowerCase() === food.name.toLowerCase())
++  if (i >= 0) {
++    const foods = N.foods.slice()
++    foods[i] = { ...food, id: N.foods[i].id }
++    return { ...N, foods }
++  }
++  if (N.foods.length >= MAX_FOODS) return N
++  return { ...N, foods: [...N.foods, food] }
++}
++
++export const removeFood = (N, id) => ({ ...N, foods: N.foods.filter(f => f.id !== id) })
++
++// Only the targets that are usable change; the rest keep their value.
++export function setTargets(N, next) {
++  const targets = { ...N.targets }
++  for (const k of Object.keys(DEFAULT_TARGETS)) {
++    const [lo, hi] = TARGET_LIMITS[k]
++    const v = num(next?.[k], lo, hi)
++    if (v != null) targets[k] = v
++  }
++  return { ...N, targets }
++}
++
++export function addDays(iso, n) {
++  const d = new Date(iso + 'T12:00:00')
++  d.setDate(d.getDate() + n)
++  return isoOf(d)
++}
++
++// The `n` days ending at `endIso`, oldest first, each with its totals (empty days included).
++export function recentDays(N, endIso, n = 7) {
++  const out = []
++  for (let i = n - 1; i >= 0; i--) {
++    const d = addDays(endIso, -i)
++    out.push({ d, ...dayTotals(dayOf(N, d)) })
++  }
++  return out
++}
++
++// Average calories and protein over the days that have food logged; null when there are none.
++export function averageLogged(rows) {
++  const logged = rows.filter(r => r.count > 0)
++  if (!logged.length) return null
++  const sum = key => logged.reduce((a, r) => a + r[key], 0) / logged.length
++  return { days: logged.length, kcal: Math.round(sum('kcal')), protein: Math.round(sum('protein') * 10) / 10 }
++}
++
++// How full a bar is, 0 to 100, and whether the value is past the target.
++export const barPct = (value, target) => (target > 0 ? Math.min(100, Math.round((Math.max(0, value) / target) * 100)) : 0)
++export const overTarget = (value, target) => target > 0 && value > target
++
++// Millilitres as litres in the UI language: 1250 reads "1.25" or "1,25", not a rounded "1.3".
++export const fmtLiters = ml => new Intl.NumberFormat(dateLocale(), { maximumFractionDigits: 2 }).format(ml / 1000)
++
++export const exportNutrition = N => JSON.stringify(N, null, 2)
++
++// Text from a backup file back into a state. Throws when it is not a JSON object, so the caller
++// can say so instead of wiping the data with an empty one.
++export function importNutrition(text) {
++  const raw = JSON.parse(text)
++  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('not a nutrition backup')
++  return normalizeNutrition(raw)
++}
+diff --git a/frontend/src/lib/nutrition.test.js b/frontend/src/lib/nutrition.test.js
+new file mode 100644
+index 00000000..09f021e7
+--- /dev/null
++++ b/frontend/src/lib/nutrition.test.js
+@@ -0,0 +1,202 @@
++import { describe, expect, it } from 'vitest'
++import {
++  DEFAULT_TARGETS, addDays, addEntry, addWater, averageLogged, barPct, dayOf, dayTotals, emptyNutrition,
++  exportNutrition, fmtLiters, importNutrition, normalizeNutrition, overTarget, recentDays, removeEntry,
++  removeFood, saveFood, setTargets,
++} from './nutrition.js'
++
++const D = '2026-10-26'
++
++describe('normalizeNutrition', () => {
++  it('turns nothing, junk and the wrong type into an empty counter with the default targets', () => {
++    for (const raw of [null, undefined, 'x', 5, [], {}]) {
++      expect(normalizeNutrition(raw)).toEqual({ v: 1, targets: DEFAULT_TARGETS, foods: [], days: {} })
++    }
++  })
++
++  it('keeps good data, clamps numbers and drops what cannot be read', () => {
++    const N = normalizeNutrition({
++      targets: { kcal: 99999, protein: 'abc', water: 3000 },
++      foods: [
++        { id: 'a', name: '  Egg ', kcal: 78, protein: 6.26 },
++        { id: 'b', name: 'egg', kcal: 1, protein: 1 },      // same name, any case
++        { id: 'c', name: '', kcal: 10 },                      // no name
++        { id: 'd', name: 'Bad', kcal: 'many' },               // no calories
++        null,
++      ],
++      days: {
++        [D]: { entries: [{ id: 'x', name: 'Rice', kcal: 200, protein: 4 }, { kcal: -5 }, 'junk'], water: 1250.4 },
++        'not-a-date': { entries: [{ kcal: 1 }], water: 1 },
++        '2026-10-25': { entries: [], water: 0 },             // nothing in it
++      },
++    })
++    expect(N.targets).toEqual({ kcal: 6000, protein: DEFAULT_TARGETS.protein, water: 3000 })
++    expect(N.foods).toEqual([{ id: 'a', name: 'Egg', kcal: 78, protein: 6.3 }])
++    expect(Object.keys(N.days)).toEqual([D])
++    expect(N.days[D].water).toBe(1250)
++    // the negative calorie value is clamped to 0, which is still a readable entry
++    expect(N.days[D].entries.map(e => e.name)).toEqual(['Rice', ''])
++  })
++
++  it('survives a round trip through JSON', () => {
++    let N = emptyNutrition()
++    N = addEntry(N, D, { name: 'Yogurt', kcal: 120, protein: 10 }, 'e1')
++    N = addWater(N, D, 500)
++    N = saveFood(N, { name: 'Yogurt', kcal: 120, protein: 10 }, 'f1')
++    expect(normalizeNutrition(JSON.parse(JSON.stringify(N)))).toEqual(N)
++  })
++})
++
++describe('entries', () => {
++  it('adds up calories and protein for the day', () => {
++    let N = emptyNutrition()
++    N = addEntry(N, D, { name: 'Eggs', kcal: 156, protein: 12.5 }, 'a')
++    N = addEntry(N, D, { name: 'Ayran', kcal: 60, protein: 3.2 }, 'b')
++    expect(dayTotals(dayOf(N, D))).toEqual({ kcal: 216, protein: 15.7, water: 0, count: 2 })
++  })
++
++  it('does not change the old state', () => {
++    const N = emptyNutrition()
++    const next = addEntry(N, D, { name: 'x', kcal: 10 }, 'a')
++    expect(N.days).toEqual({})
++    expect(next).not.toBe(N)
++  })
++
++  it('refuses an empty or unreadable entry and returns the same object', () => {
++    const N = emptyNutrition()
++    expect(addEntry(N, D, { name: 'x', kcal: 0, protein: 0 })).toBe(N)
++    expect(addEntry(N, D, { name: 'x', kcal: 'abc' })).toBe(N)
++    expect(addEntry(N, 'yesterday', { name: 'x', kcal: 100 })).toBe(N)
++  })
++
++  it('accepts protein without calories and a name that is empty', () => {
++    const N = addEntry(emptyNutrition(), D, { name: '  ', kcal: 0, protein: 25 }, 'a')
++    expect(N.days[D].entries).toEqual([{ id: 'a', name: '', kcal: 0, protein: 25 }])
++  })
++
++  it('removes an entry and drops the day once nothing is left', () => {
++    let N = addEntry(emptyNutrition(), D, { name: 'x', kcal: 100 }, 'a')
++    N = addEntry(N, D, { name: 'y', kcal: 50 }, 'b')
++    N = removeEntry(N, D, 'a')
++    expect(N.days[D].entries.map(e => e.id)).toEqual(['b'])
++    N = removeEntry(N, D, 'b')
++    expect(N.days).toEqual({})
++  })
++})
++
++describe('water', () => {
++  it('adds and takes back, never below zero or above the cap', () => {
++    let N = addWater(emptyNutrition(), D, 250)
++    N = addWater(N, D, 500)
++    expect(dayOf(N, D).water).toBe(750)
++    N = addWater(N, D, -1000)
++    expect(N.days[D]).toBeUndefined()   // back to nothing: the day leaves the file
++    N = addWater(N, D, 99999)
++    expect(dayOf(N, D).water).toBe(20000)
++  })
++
++  it('ignores a bad amount or date', () => {
++    const N = emptyNutrition()
++    expect(addWater(N, D, NaN)).toBe(N)
++    expect(addWater(N, 'x', 250)).toBe(N)
++  })
++
++  it('keeps water and food of one day together', () => {
++    let N = addWater(emptyNutrition(), D, 250)
++    N = addEntry(N, D, { name: 'x', kcal: 100 }, 'a')
++    N = removeEntry(N, D, 'a')
++    expect(dayOf(N, D).water).toBe(250)
++  })
++})
++
++describe('saved foods and targets', () => {
++  it('saves a food once per name and updates it in place', () => {
++    let N = saveFood(emptyNutrition(), { name: 'Egg', kcal: 78, protein: 6 }, 'a')
++    N = saveFood(N, { name: 'EGG', kcal: 80, protein: 6.5 }, 'b')
++    expect(N.foods).toEqual([{ id: 'a', name: 'EGG', kcal: 80, protein: 6.5 }])
++  })
++
++  it('refuses a food without a name or calories, and removes by id', () => {
++    const N = emptyNutrition()
++    expect(saveFood(N, { name: '', kcal: 10 })).toBe(N)
++    expect(saveFood(N, { name: 'x' })).toBe(N)
++    const one = saveFood(N, { name: 'x', kcal: 10 }, 'a')
++    expect(removeFood(one, 'a').foods).toEqual([])
++  })
++
++  it('changes the targets that are usable and keeps the rest', () => {
++    const N = setTargets(emptyNutrition(), { kcal: 2100, protein: '', water: 'lots' })
++    expect(N.targets).toEqual({ kcal: 2100, protein: DEFAULT_TARGETS.protein, water: DEFAULT_TARGETS.water })
++    expect(setTargets(N, { kcal: 10 }).targets.kcal).toBe(800)
++  })
++})
++
++describe('the week', () => {
++  it('addDays crosses months and years', () => {
++    expect(addDays('2026-10-31', 1)).toBe('2026-11-01')
++    expect(addDays('2026-01-01', -1)).toBe('2025-12-31')
++    expect(addDays('2026-03-01', -1)).toBe('2026-02-28')
++  })
++
++  it('addDays is not thrown off by a clock change', () => {
++    expect(addDays('2026-03-28', 1)).toBe('2026-03-29')
++    expect(addDays('2026-03-29', 1)).toBe('2026-03-30')
++    expect(addDays('2026-10-24', 1)).toBe('2026-10-25')
++    expect(addDays('2026-10-25', 1)).toBe('2026-10-26')
++  })
++
++  it('lists the last days oldest first, empty days included', () => {
++    let N = addEntry(emptyNutrition(), '2026-10-24', { name: 'x', kcal: 500, protein: 30 }, 'a')
++    N = addEntry(N, D, { name: 'y', kcal: 700, protein: 40 }, 'b')
++    const rows = recentDays(N, D, 4)
++    expect(rows.map(r => r.d)).toEqual(['2026-10-23', '2026-10-24', '2026-10-25', D])
++    expect(rows.map(r => r.kcal)).toEqual([0, 500, 0, 700])
++  })
++
++  it('averages only the days with food logged', () => {
++    let N = addEntry(emptyNutrition(), '2026-10-24', { name: 'x', kcal: 2000, protein: 100 }, 'a')
++    N = addEntry(N, D, { name: 'y', kcal: 2400, protein: 131 }, 'b')
++    expect(averageLogged(recentDays(N, D, 7))).toEqual({ days: 2, kcal: 2200, protein: 115.5 })
++    expect(averageLogged(recentDays(emptyNutrition(), D, 7))).toBeNull()
++    // a day with only water is not a day of eating
++    expect(averageLogged(recentDays(addWater(emptyNutrition(), D, 500), D, 7))).toBeNull()
++  })
++})
++
++describe('bars and units', () => {
++  it('fills a bar up to 100 and flags going past the target', () => {
++    expect(barPct(1150, 2300)).toBe(50)
++    expect(barPct(5000, 2300)).toBe(100)
++    expect(barPct(-5, 2300)).toBe(0)
++    expect(barPct(10, 0)).toBe(0)
++    expect(overTarget(2301, 2300)).toBe(true)
++    expect(overTarget(2300, 2300)).toBe(false)
++    expect(overTarget(5, 0)).toBe(false)
++  })
++
++  it('writes litres with two decimals when it needs them', () => {
++    expect(fmtLiters(1250)).toBe('1.25')
++    expect(fmtLiters(2000)).toBe('2')
++    expect(fmtLiters(0)).toBe('0')
++  })
++})
++
++describe('backup', () => {
++  it('exports and imports the same data', () => {
++    let N = addEntry(emptyNutrition(), D, { name: 'Lentil soup', kcal: 180, protein: 11 }, 'a')
++    N = saveFood(setTargets(N, { kcal: 2200 }), { name: 'Egg', kcal: 78, protein: 6 }, 'f')
++    expect(importNutrition(exportNutrition(N))).toEqual(N)
++  })
++
++  it('throws on text that is not a backup, so nothing gets wiped', () => {
++    expect(() => importNutrition('not json')).toThrow()
++    expect(() => importNutrition('[]')).toThrow()
++    expect(() => importNutrition('null')).toThrow()
++  })
++
++  it('cleans an imported file instead of trusting it', () => {
++    const N = importNutrition(JSON.stringify({ targets: { kcal: -1 }, days: { [D]: { entries: [{ name: 'x'.repeat(200), kcal: 5 }] } } }))
++    expect(N.targets.kcal).toBe(800)
++    expect(N.days[D].entries[0].name).toHaveLength(60)
++  })
++})
+diff --git a/frontend/src/locales/tr.js b/frontend/src/locales/tr.js
+index 72eb2d77..1ef8ee3d 100644
+--- a/frontend/src/locales/tr.js
++++ b/frontend/src/locales/tr.js
+@@ -2588,4 +2588,41 @@ export default {
+   'Just for this phone. Some home screens take a moment to catch up.': 'Yalnızca bu telefon için. Bazı ana ekranların fark etmesi biraz sürer.',
+   'The icon could not be changed.': 'Simge değiştirilemedi.',
+   'Try the Halloween app icon': 'Cadılar Bayramı uygulama simgesini dene',
++  // --- Nutrition counter (views/Nutrition.jsx) ---
++  'Nutrition': 'Beslenme',
++  'Calories, protein and water': 'Kalori, protein ve su',
++  'Targets and backup': 'Hedefler ve yedek',
++  'Previous day': 'Önceki gün',
++  'Next day': 'Sonraki gün',
++  'Protein': 'Protein',
++  'Water': 'Su',
++  'Add food': 'Yiyecek ekle',
++  'Quick add': 'Hızlı ekle',
++  'Eaten': 'Yenenler',
++  'Food': 'Yiyecek',
++  'Nothing logged yet.': 'Henüz bir şey kaydedilmedi.',
++  'Average over {0} days with food logged: {1} kcal, {2} g protein': 'Yemek kaydı olan {0} günün ortalaması: {1} kcal, {2} g protein',
++  'Enter calories or protein': 'Kalori veya protein gir',
++  'Give it a name to save it': 'Kaydetmek için bir ad ver',
++  'Added': 'Eklendi',
++  'What did you eat?': 'Ne yedin?',
++  'Save for quick add': 'Hızlı ekleme için kaydet',
++  'Targets': 'Hedefler',
++  'Daily calories': 'Günlük kalori',
++  'Daily protein': 'Günlük protein',
++  'Daily water': 'Günlük su',
++  'Saved foods': 'Kayıtlı yiyecekler',
++  'No saved foods yet. Turn on "Save for quick add" when you add one.': 'Henüz kayıtlı yiyecek yok. Yiyecek eklerken "Hızlı ekleme için kaydet"i aç.',
++  'Backup': 'Yedek',
++  'This data lives only in this browser. Back it up now and then.': 'Bu veri yalnızca bu tarayıcıda durur. Ara sıra yedeğini al.',
++  'Export': 'Dışa aktar',
++  'Restore from file': 'Dosyadan geri yükle',
++  'Replace your nutrition data?': 'Beslenme verilerin değiştirilsin mi?',
++  'Restoring a backup replaces what is on this device now.': 'Yedeği geri yüklemek, bu cihazdaki mevcut verinin yerine geçer.',
++  'Restore': 'Geri yükle',
++  'Backup restored': 'Yedek geri yüklendi',
++  'That file is not a nutrition backup.': 'Bu dosya bir beslenme yedeği değil.',
++  'Targets saved': 'Hedefler kaydedildi',
++  'protein': 'protein',
++  'Log your meals': 'Öğünlerini kaydet',
+ }
+diff --git a/frontend/src/store/useNutrition.js b/frontend/src/store/useNutrition.js
+new file mode 100644
+index 00000000..bf1d5a3f
+--- /dev/null
++++ b/frontend/src/store/useNutrition.js
+@@ -0,0 +1,30 @@
++import { create } from 'zustand'
++import { NUTRITION_KEY, emptyNutrition, normalizeNutrition } from '../lib/nutrition.js'
++
++// The nutrition counter's data, on this device only (lib/nutrition.js says why it is not in the
++// synced profile). A damaged or missing value reads as an empty counter.
++const read = () => {
++  try {
++    const raw = localStorage.getItem(NUTRITION_KEY)
++    return raw ? normalizeNutrition(JSON.parse(raw)) : emptyNutrition()
++  } catch { return emptyNutrition() }
++}
++const write = N => { try { localStorage.setItem(NUTRITION_KEY, JSON.stringify(N)) } catch { /* storage full or blocked: the screen still works for this visit */ } }
++
++export const useNutrition = create(set => ({
++  N: read(),
++  // `fn` gets the current data and returns the next one, as the helpers in lib/nutrition.js do.
++  // A helper that returns its input unchanged writes nothing.
++  update: fn => set(s => {
++    const N = fn(s.N)
++    if (N === s.N) return s
++    write(N)
++    return { N }
++  }),
++  // A restored backup replaces everything.
++  replace: next => set(() => {
++    const N = normalizeNutrition(next)
++    write(N)
++    return { N }
++  }),
++}))
+diff --git a/frontend/src/views/Home.jsx b/frontend/src/views/Home.jsx
+index c23b6de4..1ca19f1c 100644
+--- a/frontend/src/views/Home.jsx
++++ b/frontend/src/views/Home.jsx
+@@ -19,6 +19,8 @@ import { dayNoteOf } from '../lib/day-notes.js'
+ import { weighInAt } from '../lib/bodyweight.js'
+ import WeightRate from '../components/WeightRate.jsx'
+ import { SeasonDeco } from '../components/Seasonal.jsx'
++import { useNutrition } from '../store/useNutrition.js'
++import { dayOf, dayTotals } from '../lib/nutrition.js'
+ 
+ // Home = what to do now + a quick glance. Deep charts & history live in Stats.
+ export default function Home() {
+@@ -28,6 +30,8 @@ export default function Home() {
+   // The banner switched off and the sync stuck: a dot on the gear (Settings → Show connection status).
+   const trouble = useConnectionTrouble()
+   const [weekOffset, setWeekOffset] = useState(0)
++  // The nutrition counter's card below: today's calories and protein (device-local data).
++  const nutrition = useNutrition(s => s.N)
+ 
+   const today = new Date()
+   // A weekday can hold several routines. `todayRoutines` is the whole day; `routine` is the
+@@ -97,6 +101,7 @@ export default function Home() {
+   // in a coach week, the queue's sessions and your own days together (lib/queue.js weekTally).
+   const { done: doneThisWeek, planned: plannedPerWeek } = weekTally(S, todayISO())
+   const bwPoints = S.bodyweight.slice(-30).map(b => ({ t: weighInAt(b), y: b.w, d: b.d }))
++  const nutToday = dayTotals(dayOf(nutrition, todayISO()))
+ 
+   // today's session shown right under the week strip
+   const onToday = () => { if (S.active) nav('/workout'); else if (todayRoutines.length) startFlow(effectiveRoutineIds(S, todayISO())); else dayOverrideSheet(todayISO()) }
+@@ -231,6 +236,21 @@ export default function Home() {
+         : t("No weigh-ins yet. Log your weight to start the curve (we also ask before every workout).")}</div>}
+     </div>}
+ 
++    <div className="card tappable" style={{ cursor: 'pointer' }} {...tappable(() => nav('/nutrition'))}>
++      <div className="row between">
++        <div className="row" style={{ gap: 9 }}>
++          <span className="lrow-i" style={{ background: 'var(--green)' }}><Icon name="flame" /></span>
++          <div>
++            <div className="lbl2">{t('Nutrition')}</div>
++            <div className="ttl">{nutToday.count
++              ? t('{0} / {1} kcal · {2} g protein', fmtNum(nutToday.kcal), fmtNum(nutrition.targets.kcal), fmtNum(nutToday.protein))
++              : t('Log your meals')}</div>
++          </div>
++        </div>
++        <Icon name="chevronRight" className="chev" />
++      </div>
++    </div>
++
+     <div className="card tappable" style={{ cursor: 'pointer' }} {...tappable(() => calendarSheet())}>
+       <SeasonDeco spot="home-streak" />
+       <div className="row between">
+diff --git a/frontend/src/views/Nutrition.css b/frontend/src/views/Nutrition.css
+new file mode 100644
+index 00000000..fb33cbbc
+--- /dev/null
++++ b/frontend/src/views/Nutrition.css
+@@ -0,0 +1,23 @@
++/* Nutrition counter (views/Nutrition.jsx). Colours and radii come from the app's own variables. */
++.nut-day{align-items:center;margin-bottom:2px}
++.nut-day b{font-size:17px;letter-spacing:-.014em}
++.nut-meter{margin-top:14px}
++.nut-meter-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
++.nut-meter-top b{font-size:22px;font-weight:600;letter-spacing:-.02em}
++.nut-bar{display:block;height:8px;margin-top:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}
++.nut-bar i{display:block;height:100%;border-radius:99px;background:var(--green);transition:width var(--fast)}
++.nut-bar.over i{background:var(--orange)}
++.nut-bar.water i{background:var(--blue)}
++.nut-water-btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
++.nut-chips{display:flex;flex-wrap:wrap;gap:8px}
++.nut-chip{display:flex;flex-direction:column;align-items:flex-start;gap:1px;max-width:100%;padding:9px 13px;border-radius:var(--r);background:var(--surface-2);color:var(--label);text-align:start}
++.nut-chip span{font-size:15px;font-weight:600;overflow-wrap:anywhere}
++.nut-chip small{font-size:12px;color:var(--label-2)}
++.nut-entry{display:flex;align-items:center;justify-content:space-between;gap:10px}
++.nut-entry-main{min-width:0}
++.nut-entry-main b{overflow-wrap:anywhere}
++.nut-week-row{display:grid;grid-template-columns:104px minmax(0,1fr) auto;gap:10px;align-items:center;width:100%;padding:7px 0;color:var(--label);text-align:start}
++.nut-week-row .nut-bar{margin-top:0}
++.nut-week-row.sel .small:first-child{font-weight:600;color:var(--label)}
++.nut-week-v{min-width:92px;text-align:end}
++.nut-saved{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0}
+diff --git a/frontend/src/views/Nutrition.jsx b/frontend/src/views/Nutrition.jsx
+new file mode 100644
+index 00000000..2c492385
+--- /dev/null
++++ b/frontend/src/views/Nutrition.jsx
+@@ -0,0 +1,235 @@
++import { useRef, useState } from 'react'
++import { useNavigate } from 'react-router-dom'
++import { useNutrition } from '../store/useNutrition.js'
++import { useUI } from '../store/useUI.js'
++import {
++  addDays, addEntry, addWater, averageLogged, barPct, dayOf, dayTotals, exportNutrition, fmtLiters,
++  importNutrition, overTarget, recentDays, removeEntry, removeFood, saveFood, setTargets,
++} from '../lib/nutrition.js'
++import { fmtDate, fmtNum, todayISO } from '../lib/format.js'
++import { t } from '../lib/i18n.js'
++import Icon from '../components/Icon.jsx'
++import { Button, NumberField, Switch, TextField } from '../components/ui.jsx'
++import { confirmSheet } from '../sheets.jsx'
++import './Nutrition.css'
++
++// Calories, protein and water per day, kept on this device (lib/nutrition.js, store/useNutrition.js).
++const update = fn => useNutrition.getState().update(fn)
++const toast = message => useUI.getState().toast(message)
++
++// One bar. `limit` is for a number you should stay under (calories): past the target it turns
++// orange. Protein and water have no ceiling worth warning about.
++function Meter({ label, value, goal, shown, goalShown, limit = false, className = '' }) {
++  const pct = barPct(value, goal)
++  return <div className="nut-meter">
++    <div className="nut-meter-top">
++      <span className="muted small">{label}</span>
++      <span><b>{shown}</b> <span className="muted small">/ {goalShown}</span></span>
++    </div>
++    <div className={'nut-bar ' + className + (limit && overTarget(value, goal) ? ' over' : '')}
++      role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
++      <i style={{ width: pct + '%' }} />
++    </div>
++  </div>
++}
++
++function AddFood({ day, close }) {
++  const [name, setName] = useState('')
++  const [kcal, setKcal] = useState(null)
++  const [protein, setProtein] = useState(null)
++  const [keep, setKeep] = useState(false)
++  const save = () => {
++    const food = { name, kcal: kcal ?? 0, protein: protein ?? 0 }
++    if (!(food.kcal > 0) && !(food.protein > 0)) { toast(t('Enter calories or protein')); return }
++    if (keep && !name.trim()) { toast(t('Give it a name to save it')); return }
++    update(N => {
++      const next = addEntry(N, day, food)
++      return keep && next !== N ? saveFood(next, food) : next
++    })
++    close()
++    toast(t('Added'))
++  }
++  return <>
++    <h3>{t('Add food')}</h3>
++    <TextField value={name} maxLength={60} placeholder={t('What did you eat?')} autoFocus
++      onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') save() }} />
++    <div style={{ height: 12 }} />
++    <div className="measure-form">
++      <label className="measure-field">
++        <span>{t('Calories')}</span>
++        <span className="measure-input"><NumberField nullable decimal={false} value={kcal} onChange={setKcal} placeholder="0" /><i>kcal</i></span>
++      </label>
++      <label className="measure-field">
++        <span>{t('Protein')}</span>
++        <span className="measure-input"><NumberField nullable value={protein} onChange={setProtein} placeholder="0" /><i>g</i></span>
++      </label>
++    </div>
++    <div className="lrow" style={{ marginTop: 8 }}>
++      <span className="lrow-m"><span className="lrow-t">{t('Save for quick add')}</span></span>
++      <Switch checked={keep} onChange={setKeep} aria-label={t('Save for quick add')} />
++    </div>
++    <div style={{ height: 14 }} />
++    <Button variant="primary" onClick={save}>{t('Add')}</Button>
++    <div style={{ height: 8 }} />
++    <Button variant="ghost" className="dim" onClick={close}>{t('Cancel')}</Button>
++  </>
++}
++
++export function addFoodSheet(day = todayISO()) {
++  return useUI.getState().openSheet(close => <AddFood day={day} close={close} />)
++}
++
++function Manage({ close }) {
++  const N = useNutrition(s => s.N)
++  const [kcal, setKcal] = useState(N.targets.kcal)
++  const [protein, setProtein] = useState(N.targets.protein)
++  const [water, setWater] = useState(N.targets.water)
++  const fileRef = useRef(null)
++
++  const saveTargets = () => {
++    // An emptied field reads 0: it keeps the target it had instead of snapping to the lowest.
++    update(cur => setTargets(cur, { kcal: kcal || null, protein: protein || null, water: water || null }))
++    toast(t('Targets saved'))
++    close()
++  }
++  const exportFile = () => {
++    const blob = new Blob([exportNutrition(useNutrition.getState().N)], { type: 'application/json' })
++    const a = document.createElement('a')
++    a.href = URL.createObjectURL(blob)
++    a.download = 'opengym-nutrition-' + todayISO() + '.json'
++    a.click()
++    URL.revokeObjectURL(a.href)
++  }
++  // The file is read first and only a good one reaches the question: picking the wrong file
++  // must not wipe the data that is here.
++  const onFile = async e => {
++    const file = e.target.files?.[0]
++    e.target.value = ''
++    if (!file) return
++    let next
++    try { next = importNutrition(await file.text()) } catch { toast(t('That file is not a nutrition backup.')); return }
++    confirmSheet({
++      title: t('Replace your nutrition data?'),
++      message: t('Restoring a backup replaces what is on this device now.'),
++      confirmText: t('Restore'), danger: true,
++      onConfirm: () => { useNutrition.getState().replace(next); toast(t('Backup restored')); close() },
++    })
++  }
++
++  return <>
++    <h3>{t('Targets')}</h3>
++    <div className="measure-form">
++      <label className="measure-field">
++        <span>{t('Daily calories')}</span>
++        <span className="measure-input"><NumberField decimal={false} value={kcal} onChange={setKcal} /><i>kcal</i></span>
++      </label>
++      <label className="measure-field">
++        <span>{t('Daily protein')}</span>
++        <span className="measure-input"><NumberField decimal={false} value={protein} onChange={setProtein} /><i>g</i></span>
++      </label>
++      <label className="measure-field">
++        <span>{t('Daily water')}</span>
++        <span className="measure-input"><NumberField decimal={false} value={water} onChange={setWater} /><i>ml</i></span>
++      </label>
++    </div>
++    <div style={{ height: 14 }} />
++    <Button variant="primary" onClick={saveTargets}>{t('Save')}</Button>
++
++    <h4 className="sec" style={{ margin: '20px 2px 6px' }}>{t('Saved foods')}</h4>
++    {N.foods.length ? N.foods.map(f => <div className="nut-saved" key={f.id}>
++      <div style={{ minWidth: 0 }}>
++        <b style={{ overflowWrap: 'anywhere' }}>{f.name}</b>
++        <div className="small dim">{fmtNum(f.kcal)} kcal · {fmtNum(f.protein)} g</div>
++      </div>
++      <button className="iconbtn" style={{ color: 'var(--red)' }} onClick={() => update(cur => removeFood(cur, f.id))} aria-label={t('Delete')}><Icon name="trash" /></button>
++    </div>) : <div className="muted small">{t('No saved foods yet. Turn on "Save for quick add" when you add one.')}</div>}
++
++    <h4 className="sec" style={{ margin: '20px 2px 6px' }}>{t('Backup')}</h4>
++    <div className="muted small" style={{ marginBottom: 10 }}>{t('This data lives only in this browser. Back it up now and then.')}</div>
++    <div className="row" style={{ gap: 8 }}>
++      <Button icon="download" onClick={exportFile}>{t('Export')}</Button>
++      <Button icon="folder" onClick={() => fileRef.current?.click()}>{t('Restore from file')}</Button>
++    </div>
++    <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={onFile} />
++    <div style={{ height: 14 }} />
++    <Button variant="ghost" className="dim" onClick={close}>{t('Done')}</Button>
++  </>
++}
++
++export function manageNutritionSheet() {
++  return useUI.getState().openSheet(close => <Manage close={close} />)
++}
++
++export default function Nutrition() {
++  const nav = useNavigate()
++  const N = useNutrition(s => s.N)
++  const today = todayISO()
++  const [day, setDay] = useState(today)
++  const isToday = day >= today
++  const entries = dayOf(N, day).entries
++  const totals = dayTotals(dayOf(N, day))
++  const { kcal, protein, water } = N.targets
++  const week = recentDays(N, today, 7)
++  const avg = averageLogged(week)
++
++  const quickAdd = food => {
++    update(cur => addEntry(cur, day, food))
++    toast(t('Added {0}', food.name))
++  }
++
++  return <div className="narrow">
++    <div className="hdr">
++      <button className="iconbtn" data-back="/home" onClick={() => nav('/home')} aria-label={t('Home')}><Icon name="chevronLeft" /></button>
++      <div style={{ flex: 1, marginInlineStart: 12 }}><h1>{t('Nutrition')}</h1><div className="sub">{t('Calories, protein and water')}</div></div>
++      <button className="iconbtn" onClick={manageNutritionSheet} aria-label={t('Targets and backup')}><Icon name="gear" /></button>
++    </div>
++
++    <div className="card">
++      <div className="row between nut-day">
++        <button className="iconbtn" onClick={() => setDay(addDays(day, -1))} aria-label={t('Previous day')}><Icon name="chevronLeft" /></button>
++        <b>{isToday ? t('Today') : fmtDate(day, true, true)}</b>
++        <button className="iconbtn" disabled={isToday} onClick={() => setDay(addDays(day, 1))} aria-label={t('Next day')}><Icon name="chevronRight" /></button>
++      </div>
++      <Meter label={t('Calories')} value={totals.kcal} goal={kcal} limit
++        shown={fmtNum(totals.kcal)} goalShown={fmtNum(kcal) + ' kcal'} />
++      <Meter label={t('Protein')} value={totals.protein} goal={protein}
++        shown={fmtNum(totals.protein)} goalShown={fmtNum(protein) + ' g'} />
++      <Meter label={t('Water')} value={totals.water} goal={water} className="water"
++        shown={fmtLiters(totals.water)} goalShown={fmtLiters(water) + ' L'} />
++      <div className="nut-water-btns">
++        <Button size="sm" icon="plus" onClick={() => update(cur => addWater(cur, day, 250))}>{t('+{0} ml', 250)}</Button>
++        <Button size="sm" icon="plus" onClick={() => update(cur => addWater(cur, day, 500))}>{t('+{0} ml', 500)}</Button>
++        <Button size="sm" variant="ghost" className="dim" icon="undo" disabled={!totals.water} onClick={() => update(cur => addWater(cur, day, -250))}>{t('-{0} ml', 250)}</Button>
++      </div>
++    </div>
++
++    <Button variant="primary" icon="plus" onClick={() => addFoodSheet(day)}>{t('Add food')}</Button>
++
++    {N.foods.length > 0 && <>
++      <h4 className="sec" style={{ margin: '18px 2px 10px' }}>{t('Quick add')}</h4>
++      <div className="nut-chips">{N.foods.map(f => <button className="nut-chip" key={f.id} onClick={() => quickAdd(f)}>
++        <span>{f.name}</span>
++        <small>{fmtNum(f.kcal)} kcal · {fmtNum(f.protein)} g</small>
++      </button>)}</div>
++    </>}
++
++    <h4 className="sec" style={{ margin: '18px 2px 10px' }}>{t('Eaten')}</h4>
++    {entries.length ? <div className="list">{entries.map(e => <div className="card nut-entry" key={e.id}>
++      <div className="nut-entry-main">
++        <b>{e.name || t('Food')}</b>
++        <div className="small dim" style={{ marginTop: 2 }}>{fmtNum(e.kcal)} kcal · {fmtNum(e.protein)} g {t('protein')}</div>
++      </div>
++      <button className="iconbtn" style={{ color: 'var(--red)' }} onClick={() => update(cur => removeEntry(cur, day, e.id))} aria-label={t('Delete')}><Icon name="trash" /></button>
++    </div>)}</div> : <div className="muted small" style={{ margin: '0 2px' }}>{t('Nothing logged yet.')}</div>}
++
++    <h4 className="sec" style={{ margin: '18px 2px 10px' }}>{t('Last 7 days')}</h4>
++    <div className="card">
++      {week.map(r => <button className={'nut-week-row' + (r.d === day ? ' sel' : '')} key={r.d} onClick={() => setDay(r.d)}>
++        <span className="small">{fmtDate(r.d, true)}</span>
++        <span className={'nut-bar' + (overTarget(r.kcal, kcal) ? ' over' : '')}><i style={{ width: barPct(r.kcal, kcal) + '%' }} /></span>
++        <span className="small dim nut-week-v">{r.count ? fmtNum(r.kcal) + ' kcal · ' + fmtNum(r.protein) + ' g' : '–'}</span>
++      </button>)}
++      {avg && <div className="muted small" style={{ marginTop: 8 }}>{t('Average over {0} days with food logged: {1} kcal, {2} g protein', avg.days, fmtNum(avg.kcal), fmtNum(avg.protein))}</div>}
++    </div>
++  </div>
++}
+diff --git a/frontend/src/views/Nutrition.test.jsx b/frontend/src/views/Nutrition.test.jsx
+new file mode 100644
+index 00000000..c0ddfd28
+--- /dev/null
++++ b/frontend/src/views/Nutrition.test.jsx
+@@ -0,0 +1,113 @@
++// @vitest-environment happy-dom
++/* The nutrition counter, used the way a person uses it: add a food, tap a saved one, add water,
++ * delete a mistake, look at another day. The numbers themselves are covered in lib/nutrition.test.js.
++ */
++import React, { act } from 'react'
++import { createRoot } from 'react-dom/client'
++import { MemoryRouter } from 'react-router-dom'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('../lib/api.js', async importOriginal => ({ ...(await importOriginal()), api: vi.fn(() => Promise.reject(new Error('offline'))), beacon: vi.fn() }))
++
++import { useNutrition } from '../store/useNutrition.js'
++import { useUI } from '../store/useUI.js'
++import { dayOf, dayTotals, emptyNutrition } from '../lib/nutrition.js'
++import { todayISO } from '../lib/format.js'
++import Nutrition, { addFoodSheet } from './Nutrition.jsx'
++
++const mounted = []
++function render(el) {
++  const host = document.createElement('div')
++  document.body.appendChild(host)
++  const root = createRoot(host)
++  mounted.push(root)
++  act(() => root.render(<MemoryRouter>{el}</MemoryRouter>))
++  return host
++}
++const topSheet = () => { const s = useUI.getState().sheets.at(-1); return s ? render(s.render(() => useUI.getState().closeSheet(s.id))) : null }
++const setValue = (input, v) => act(() => {
++  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, v)
++  input.dispatchEvent(new Event('input', { bubbles: true }))
++})
++const click = (host, text) => act(() => { [...host.querySelectorAll('button')].find(b => b.textContent.trim() === text).click() })
++const today = () => dayTotals(dayOf(useNutrition.getState().N, todayISO()))
++
++function seed(patch = {}) { useNutrition.setState({ N: { ...emptyNutrition(), ...patch } }) }
++
++beforeEach(() => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true
++  localStorage.clear()
++  useUI.setState({ sheets: [], toastMsg: '' })
++  document.body.innerHTML = ''
++  seed()
++})
++afterEach(() => { act(() => { mounted.splice(0).forEach(r => r.unmount()) }) })
++
++describe('the nutrition counter', () => {
++  it('starts empty, and a food typed into the sheet lands on today', () => {
++    const screen = render(<Nutrition />)
++    expect(screen.textContent).toContain('Nothing logged yet.')
++    act(() => addFoodSheet())
++    const form = topSheet()
++    const [kcal, protein] = form.querySelectorAll('input.num')
++    setValue(form.querySelector('input.field'), 'Lentil soup')
++    setValue(kcal, '180')
++    setValue(protein, '11')
++    click(form, 'Add')
++    expect(today()).toMatchObject({ kcal: 180, protein: 11, count: 1 })
++    expect(screen.textContent).toContain('Lentil soup')
++    expect(screen.textContent).not.toContain('Nothing logged yet.')
++  })
++
++  it('refuses an empty food and says so', () => {
++    render(<Nutrition />)
++    act(() => addFoodSheet())
++    const form = topSheet()
++    click(form, 'Add')
++    expect(today().count).toBe(0)
++    expect(useUI.getState().toastMsg).toBe('Enter calories or protein')
++  })
++
++  it('"Save for quick add" keeps the food as a chip that adds it again with one tap', () => {
++    const screen = render(<Nutrition />)
++    act(() => addFoodSheet())
++    const form = topSheet()
++    const [kcal, protein] = form.querySelectorAll('input.num')
++    setValue(form.querySelector('input.field'), 'Egg')
++    setValue(kcal, '78')
++    setValue(protein, '6')
++    act(() => form.querySelector('[role="switch"]').click())
++    click(form, 'Add')
++    expect(useNutrition.getState().N.foods.map(f => f.name)).toEqual(['Egg'])
++    act(() => screen.querySelector('.nut-chip').click())
++    expect(today()).toMatchObject({ kcal: 156, protein: 12, count: 2 })
++  })
++
++  it('adds water in steps and takes a step back', () => {
++    const screen = render(<Nutrition />)
++    click(screen, '+500 ml')
++    click(screen, '+250 ml')
++    expect(today().water).toBe(750)
++    click(screen, '-250 ml')
++    expect(today().water).toBe(500)
++  })
++
++  it('deletes a mistaken entry', () => {
++    seed({ days: { [todayISO()]: { entries: [{ id: 'a', name: 'Cake', kcal: 400, protein: 4 }], water: 0 } } })
++    const screen = render(<Nutrition />)
++    expect(screen.textContent).toContain('Cake')
++    act(() => screen.querySelector('.nut-entry button').click())
++    expect(today().count).toBe(0)
++    expect(screen.textContent).not.toContain('Cake')
++  })
++
++  it('steps back a day to log something forgotten, and cannot go past today', () => {
++    const screen = render(<Nutrition />)
++    expect(screen.querySelector('[aria-label="Next day"]').disabled).toBe(true)
++    act(() => screen.querySelector('[aria-label="Previous day"]').click())
++    expect(screen.querySelector('[aria-label="Next day"]').disabled).toBe(false)
++    expect(screen.textContent).not.toContain('Today')
++    click(screen, '+250 ml')
++    expect(today().water).toBe(0)   // it went to yesterday
++  })
++})

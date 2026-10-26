@@ -1,0 +1,83 @@
+{
+  "opengym_plan": 1,
+  "exported": "2026-10-26",
+  "name": "Ev antrenmanı",
+  "unit": "kg",
+  "week": {},
+  "routines": [
+    {
+      "id": "ev-antrenmani",
+      "name": "Ev antrenmanı",
+      "ex": [
+        { "id": "ev-sandalye-squat", "sets": 3, "reps": 12 },
+        { "id": "ev-duvar-sinav", "sets": 3, "reps": 10 },
+        { "id": "ev-masa-alti-cekis", "sets": 3, "reps": 10 },
+        { "id": "ev-kalca-koprusu", "sets": 3, "reps": 12 },
+        { "id": "ev-su-sisesi-omuz-press", "sets": 3, "reps": 10 },
+        { "id": "ev-plank", "sets": 3, "mode": "time", "sec": 30 }
+      ]
+    }
+  ],
+  "customEx": [
+    {
+      "id": "ev-sandalye-squat",
+      "n": "Sandalye squat",
+      "bp": "upper legs",
+      "eq": "body weight",
+      "aliases": ["ev", "ev hareketi", "home", "chair squat"],
+      "desc": "Sağlam bir sandalyenin önünde dur, kalçanı geriye itip sandalyeye otur, sonra ayağa kalk. Ev hareketi.",
+      "primaries": ["quadriceps", "gluteal"],
+      "secondaries": ["hamstring"]
+    },
+    {
+      "id": "ev-duvar-sinav",
+      "n": "Duvar şınavı",
+      "bp": "chest",
+      "eq": "body weight",
+      "aliases": ["ev", "ev hareketi", "home", "wall push-up", "masa şınavı"],
+      "desc": "Ellerini omuz hizasında duvara ya da sağlam bir masaya koy, vücudunu düz tutarak göğsünü yaklaştır ve it. Kolaylaşınca duvardan masaya, masadan yere yakın eğime geç. Ev hareketi.",
+      "primaries": ["chest"],
+      "secondaries": ["triceps", "deltoids"]
+    },
+    {
+      "id": "ev-masa-alti-cekis",
+      "n": "Masa altı çekiş",
+      "bp": "back",
+      "eq": "body weight",
+      "aliases": ["ev", "ev hareketi", "home", "inverted row", "gövde çekişi"],
+      "desc": "Sağlam bir masanın altına uzan, kenarından tutup vücudunu düz tutarak göğsünü masaya doğru çek. Ev hareketi.",
+      "primaries": ["upper-back"],
+      "secondaries": ["biceps", "forearm"]
+    },
+    {
+      "id": "ev-kalca-koprusu",
+      "n": "Kalça köprüsü",
+      "bp": "upper legs",
+      "eq": "body weight",
+      "aliases": ["ev", "ev hareketi", "home", "glute bridge"],
+      "desc": "Sırtüstü yat, dizlerini bük, topuklarını yere bastırıp kalçanı kaldır ve yukarıda sık. Ev hareketi.",
+      "primaries": ["gluteal"],
+      "secondaries": ["hamstring", "lower-back"]
+    },
+    {
+      "id": "ev-su-sisesi-omuz-press",
+      "n": "Su şişesiyle omuz press",
+      "bp": "shoulders",
+      "eq": "body weight",
+      "aliases": ["ev", "ev hareketi", "home", "bottle press"],
+      "desc": "Elinde dolu su şişeleri ya da sırt çantası ile omuz hizasından başının üstüne doğru it. Ev hareketi.",
+      "primaries": ["deltoids"],
+      "secondaries": ["triceps"]
+    },
+    {
+      "id": "ev-plank",
+      "n": "Plank",
+      "bp": "waist",
+      "eq": "body weight",
+      "aliases": ["ev", "ev hareketi", "home", "plank"],
+      "desc": "Dirsekler omuzların altında, vücut baştan topuğa düz. Zorlanırsan dizlerini yere koy. Ev hareketi.",
+      "primaries": ["abs"],
+      "secondaries": ["obliques", "lower-back"]
+    }
+  ]
+}
